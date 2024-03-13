@@ -1,0 +1,126 @@
+[build-system]
+requires = [
+    "setuptools >= 64",
+    "setuptools_scm >= 6.4"
+]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "asyncfusion"
+description = "Alternative async event loop compatible with asyncio and Trio"
+readme = "README.rst"
+authors = [{name = "Alex Grönholm", email = "alex.gronholm@nextday.fi"}]
+license = {text = "MIT"}
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Framework :: AsyncIO",
+    "Framework :: TrioIO",
+    "Typing :: Typed",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+requires-python = ">= 3.9"
+dependencies = [
+    "exceptiongroup >= 1.0.2; python_version < '3.11'",
+    "typing_extensions >= 4.1; python_version < '3.11'",
+]
+dynamic = ["version"]
+
+[project.urls]
+Documentation = "https://asyncfusion.readthedocs.io/en/latest/"
+Changelog = "https://asyncfusion.readthedocs.io/en/stable/versionhistory.html"
+"Source code" = "https://github.com/agronholm/asyncfusion"
+"Issue tracker" = "https://github.com/agronholm/asyncfusion/issues"
+
+[project.scripts]
+asyncfusion = "asyncfusion.__main__:main"
+
+[project.optional-dependencies]
+test = [
+    "coverage[toml] >= 7",
+    "pytest >= 7.0",
+    "pytest-mock >= 3.6.1",
+    "trustme",
+]
+doc = [
+    "packaging",
+    "Sphinx >= 7",
+    "sphinx_rtd_theme",
+    "sphinx-autodoc-typehints >= 1.2.0",
+]
+
+[tool.setuptools_scm]
+version_scheme = "post-release"
+local_scheme = "dirty-tag"
+
+[tool.ruff]
+lint.select = [
+    "E", "F", "W",  # default flake-8
+    "I",            # isort
+    "PGH",          # pygrep-hooks
+    "UP",           # pyupgrade
+]
+src = ["src"]
+
+[tool.ruff.lint.isort]
+"required-imports" = ["from __future__ import annotations"]
+
+[tool.mypy]
+python_version = "3.9"
+strict = true
+ignore_missing_imports = true
+disallow_any_generics = false
+warn_return_any = false
+disallow_untyped_decorators = false
+disallow_subclassing_any = false
+show_error_codes = true
+
+[tool.pytest.ini_options]
+addopts = "-rsx --tb=short --strict-config --strict-markers -p no:asyncio -p no:trio"
+testpaths = ["tests"]
+xfail_strict = true
+markers = [
+    "network: marks tests as requiring Internet access",
+]
+
+[tool.coverage.run]
+source = ["asyncfusion"]
+relative_files = true
+
+[tool.coverage.report]
+show_missing = true
+
+[tool.tox]
+legacy_tox_ini = """
+[tox]
+envlist = pre-commit, py39, py310, py311, py312, pypy3
+skip_missing_interpreters = true
+minversion = 4.0.0
+
+[testenv]
+depends = pre-commit
+package = editable
+commands = coverage run -m pytest {posargs}
+extras = test
+
+[testenv:pre-commit]
+depends =
+package = skip
+deps = pre-commit
+commands = pre-commit run --all-files
+
+[testenv:pyright]
+deps = pyright
+commands = pyright --verifytypes asyncfusion
+
+[testenv:docs]
+depends =
+extras = doc
+commands = sphinx-build -W docs build/sphinx
+"""
