@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import socket
+import sys
 from functools import singledispatch
 from socket import AddressFamily, SocketKind
 from types import TracebackType
 from typing import Optional, overload
-import sys
 
 from ._eventloop import current_event_loop
 
@@ -28,10 +28,6 @@ IPAddress: TypeAlias = "tuple[str, int] | tuple[str, int, int, int]"
 SocketAddress: TypeAlias = "str | IPAddress"
 
 
-# def socket(family: AddressFamily = AddressFamily.AF_INET, type: SocketKind = SocketKind.SOCK_STREAM, proto: int = 0, fileno: int | None = None) -> AsyncSocket:
-#     sock = socket.socket(family, type, proto, fileno)
-#     return AsyncSocket(sock)
-
 class AsyncSocket:
     __slots__ = ("_loop", "_sock", "_fileno")
 
@@ -43,7 +39,13 @@ class AsyncSocket:
         self._fileno = sock.fileno()
 
     @__init__.register
-    def __init__(self, family: AddressFamily = AddressFamily.AF_INET, type: SocketKind = SocketKind.SOCK_STREAM, proto: int = 0, fileno: Optional[int] = None):
+    def __init__(
+        self,
+        family: AddressFamily = AddressFamily.AF_INET,
+        type: SocketKind = SocketKind.SOCK_STREAM,
+        proto: int = 0,
+        fileno: Optional[int] = None,
+    ):
         self._loop = current_event_loop()
         self._sock = socket.socket(family, type, proto, fileno)
         self._sock.setblocking(False)
@@ -91,8 +93,8 @@ class AsyncSocket:
         self._sock.bind(address)
 
     async def connect(self, address: SocketAddress, /) -> None:
-        if isinstance(address, tuple) and isinstance(address[0], str):
-            address = (address[0].encode("ascii"), address[1])
+        # if isinstance(address, tuple) and isinstance(address[0], str):
+        #     address = address[0].encode("ascii"), address[1])
 
         return await self._loop.sock_connect(self._fileno, self._sock.family, address)
 

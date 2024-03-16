@@ -175,7 +175,7 @@ class EventLoop:
     def time(self) -> float:
         return time.monotonic() - self._start_time
 
-    def sleep(self, delay: float, result: T_Retval = None) -> Awaitable[Any]:
+    def sleep(self, delay: float, result: T_Retval | None = None) -> Awaitable[Any]:
         if delay <= 0:
             future = Future[T_Retval]()
             future.set_result(result)
