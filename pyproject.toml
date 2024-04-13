@@ -28,7 +28,7 @@ classifiers = [
 requires-python = ">= 3.9"
 dependencies = [
     "exceptiongroup >= 1.0.2; python_version < '3.11'",
-    "typing_extensions >= 4.1; python_version < '3.11'",
+    "typing_extensions >= 4.1; python_version < '3.12'",
 ]
 dynamic = ["version"]
 

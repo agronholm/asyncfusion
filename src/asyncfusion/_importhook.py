@@ -26,6 +26,9 @@ class AsyncReplaceFinder(MetaPathFinder):
         if fullname == "asyncio" or fullname.startswith("asyncio."):
             base_path = asyncio_path
         elif fullname == "trio" or fullname.startswith("trio."):
+            if "tests" in fullname:
+                return None
+
             base_path = trio_path
         else:
             return None
@@ -46,7 +49,7 @@ class AsyncReplaceFinder(MetaPathFinder):
         return spec_from_file_location(fullname, final_path)
 
 
-def install() -> None:
+def install(debug: bool = False) -> None:
     # Skip if we already have the import hook in place
     if any(isinstance(finder, AsyncReplaceFinder) for finder in sys.meta_path):
         return
@@ -58,4 +61,4 @@ def install() -> None:
                 f"imported"
             )
 
-    sys.meta_path.insert(0, AsyncReplaceFinder())
+    sys.meta_path.insert(0, AsyncReplaceFinder(debug))

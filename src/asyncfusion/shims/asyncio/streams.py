@@ -2,16 +2,19 @@ from __future__ import annotations
 
 import sys
 from collections.abc import Awaitable, Callable
+from os import PathLike
 from typing import Any
 
-from asyncfusion.shims.asyncio import AbstractEventLoop
+from .events import AbstractEventLoop
 
 if sys.version_info >= (3, 10):
     from typing import TypeAlias
 else:
     from typing_extensions import TypeAlias
 
-_ClientConnectedCallback: TypeAlias = Callable[["StreamReader", "StreamWriter"], "Awaitable[None] | None"]
+_ClientConnectedCallback: TypeAlias = Callable[
+    ["StreamReader", "StreamWriter"], "Awaitable[None] | None"
+]
 
 
 async def open_connection(
@@ -39,12 +42,30 @@ async def start_server(
 
 
 async def open_unix_connection(
-    path: StrPath | None = None, *, limit: int = 65536, ssl=None, sock=None, server_hostname=None, ssl_handshake_timeout: float | None = None, ssl_shutdown_timeout: float | None = None
+    path: str | PathLike[str] | None = None,
+    *,
+    limit: int = 65536,
+    ssl=None,
+    sock=None,
+    server_hostname=None,
+    ssl_handshake_timeout: float | None = None,
+    ssl_shutdown_timeout: float | None = None,
 ) -> tuple[StreamReader, StreamWriter]:
     raise NotImplementedError
 
 
-async def start_unix_server(client_connected_cb, path=None, *, limit=None, sock=None, backlog: int = 100, ssl=None, ssl_handshake_timeout=None, ssl_shutdown_timeout=None, start_serving=True):
+async def start_unix_server(
+    client_connected_cb,
+    path=None,
+    *,
+    limit=None,
+    sock=None,
+    backlog: int = 100,
+    ssl=None,
+    ssl_handshake_timeout=None,
+    ssl_shutdown_timeout=None,
+    start_serving=True,
+):
     raise NotImplementedError
 
 
@@ -70,7 +91,14 @@ class StreamWriter:
     async def drain(self) -> None:
         raise NotImplementedError
 
-    async def start_tls(self, sslcontext, *, server_hostname=None, ssl_handshake_timeout=None, ssl_shutdown_timeout=None) -> None:
+    async def start_tls(
+        self,
+        sslcontext,
+        *,
+        server_hostname=None,
+        ssl_handshake_timeout=None,
+        ssl_shutdown_timeout=None,
+    ) -> None:
         raise NotImplementedError
 
     def is_closing(self) -> bool:

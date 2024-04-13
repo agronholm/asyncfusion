@@ -57,7 +57,7 @@ class MemorySendChannel(Generic[T]):
     async def __aexit__(
         self,
         exc_type: type[BaseException] | None,
-        exc_val: BaseException,
+        exc_val: BaseException | None,
         exc_tb: TracebackType | None,
     ) -> None:
         self.close()

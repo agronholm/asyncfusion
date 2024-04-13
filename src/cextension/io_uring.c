@@ -27,7 +27,9 @@ enum RequestType {
     CONNECT,
     POLL,
     RECV,
+    RECV_INTO,
     RECVFROM,
+    RECVFROM_INTO,
     SEND,
     SENDTO,
     SLEEP
@@ -46,10 +48,23 @@ struct recv_operation {
     char *buf;
 };
 
+struct recv_into_operation {
+    Py_buffer buf;
+};
+
 struct recvfrom_operation {
     int sockfd;
     char *buf;
     size_t buflen;
+    int flags;
+    struct sockaddr_storage from_addr;
+    socklen_t addrlen;
+};
+
+struct recvfrom_into_operation {
+    int sockfd;
+    Py_buffer buf;
+    int nbytes;
     int flags;
     struct sockaddr_storage from_addr;
     socklen_t addrlen;
@@ -61,7 +76,6 @@ struct sendto_operation {
 
 struct sleep_operation {
     struct __kernel_timespec ts;
-    PyObject *result;
 };
 
 struct request {
@@ -71,7 +85,9 @@ struct request {
         struct accept_operation accept;
         struct connect_operation connect;
         struct recv_operation recv;
+        struct recv_into_operation recv_into;
         struct recvfrom_operation recvfrom;
+        struct recvfrom_into_operation recvfrom_into;
         struct sendto_operation sendto;
         struct sleep_operation sleep;
     };
@@ -151,13 +167,16 @@ static void free_request(struct request *req) {
                 PyMem_Free(req->recv.buf);
 
             break;
+        case RECV_INTO:
+            PyBuffer_Release(&req->recv_into.buf);
+            break;
         case RECVFROM:
             if (req->recvfrom.buf)
                 PyMem_Free(req->recvfrom.buf);
 
             break;
-        case SLEEP:
-            Py_DECREF(req->sleep.result);
+        case RECVFROM_INTO:
+            PyBuffer_Release(&req->recvfrom_into.buf);
             break;
         default:
             break;
@@ -245,10 +264,8 @@ static int parse_sockaddr(
             // Convert the bytestring into a C character array and length
             char *path;
             Py_ssize_t pathlen;
-            if (PyBytes_AsStringAndSize(addr_bytestring, &path, &pathlen) < 0) {
-                printf("PyBytes_AsStringAndSize failed\n");
+            if (PyBytes_AsStringAndSize(addr_bytestring, &path, &pathlen) < 0)
                 goto unix_error;
-            }
 
             // Check that the path doesn't exceed the maximum size
             if ((unsigned long)pathlen >= sizeof(addr_un->sun_path)) {
@@ -320,14 +337,8 @@ static int handle_cqe(struct io_uring_cqe *cqe) {
             goto error;
    } else {
         switch (req->type) {
-            case RECV:
-                result = PyBytes_FromStringAndSize(req->recv.buf, cqe->res);
-                break;
             case SEND:
                 result = PyLong_FromSsize_t(cqe->res);
-                break;
-            case SLEEP:
-                result = req->sleep.result;
                 break;
             case ACCEPT:
                 PyObject *addr_object = build_pyobject_from_sockaddr(&req->accept.from_addr);
@@ -335,6 +346,12 @@ static int handle_cqe(struct io_uring_cqe *cqe) {
                     goto error;
 
                 result = Py_BuildValue("iO", cqe->res, addr_object);
+                break;
+            case RECV:
+                result = PyBytes_FromStringAndSize(req->recv.buf, cqe->res);
+                break;
+            case RECV_INTO:
+                result = PyLong_FromSsize_t(cqe->res);
                 break;
             case RECVFROM:
                 // Got the POLLIN event, so the socket can be read from now
@@ -356,6 +373,28 @@ static int handle_cqe(struct io_uring_cqe *cqe) {
                     goto error;
 
                 result = Py_BuildValue("y#O", req->recvfrom.buf, retval, addr_object);
+                break;
+            case RECVFROM_INTO:
+                // Got the POLLIN event, so the socket can be read from now
+                addrlen = sizeof(struct sockaddr_storage);
+                retval = recvfrom(
+                    req->recvfrom_into.sockfd, req->recvfrom_into.buf.buf, req->recvfrom_into.nbytes,
+                    req->recvfrom_into.flags, (struct sockaddr *)&req->recvfrom_into.from_addr, &addrlen
+                );
+                PyBuffer_Release(&req->recvfrom_into.buf);
+                if (retval < 0) {
+                    result = PyObject_CallFunction(PyExc_OSError, "is", errno, strerror(errno));
+                    if (!result || !PyObject_CallMethodOneArg(req->future, future_str_set_exception, result))
+                        goto error;
+
+                    break;
+                }
+
+                addr_object = build_pyobject_from_sockaddr(&req->recvfrom_into.from_addr);
+                if (!addr_object)
+                    goto error;
+
+                result = Py_BuildValue("nO", retval, addr_object);
                 break;
             default:
                 result = Py_None;
@@ -526,45 +565,101 @@ static PyObject *asyncfusion_uring_sock_recv(IoUringObject *self, PyObject *args
         return NULL;
     }
 
-    // Prepare the recv() operation and attach the future to the SQE
+    // Prepare the recv() operation
     io_uring_prep_recv(sqe, sockfd, req->recv.buf, length, flags);
 
     Py_INCREF(req->future);
     return req->future;
 }
 
-static PyObject *asyncfusion_uring_sock_recvfrom(IoUringObject *self, PyObject *args) {
-    int sockfd;
-    ssize_t length;
-    int flags = 0;
-    if (!PyArg_ParseTuple(args, "in|i:sock_recvfrom", &sockfd, &length, &flags))
-        return NULL;
-
-    // Create the request and submission queue entry
-    struct io_uring_sqe *sqe;
-    struct request *req = create_request(RECVFROM, &self->ring, &sqe);
+static PyObject *asyncfusion_uring_sock_recv_into(IoUringObject *self, PyObject *args) {
+    // Create the request (without a SQE)
+    struct request *req = create_request(RECV_INTO, &self->ring, NULL);
     if (!req)
         return NULL;
 
-    // Fill in the recvfrom structure
-    req->recvfrom.sockfd = sockfd;
-    req->recvfrom.buflen = length;
-    req->recvfrom.flags = flags;
+    int sockfd;
+    int flags = 0;
+    if (!PyArg_ParseTuple(args, "iw*|i:sock_recv_into", &sockfd, &req->recv_into.buf, &flags))
+        goto error;
 
-    // Allocate a buffer for the receive operation
-    req->recvfrom.buf = PyMem_Malloc(length);
-    if (!req->recvfrom.buf) {
-        free_request(req);
-        PyErr_NoMemory();
-        return NULL;
-    }
+    // Create the submission queue entry
+    struct io_uring_sqe *sqe = get_new_sqe(&self->ring, req);
+    if (!sqe)
+        goto error;
 
-    // Prepare the poll_add() operation (as there is no recvfrom operation in io_uring
-    // at this time) and attach the future to the SQE
-    io_uring_prep_poll_add(sqe, sockfd, POLLIN);
+    // Prepare the recv() operation
+    io_uring_prep_recv(sqe, sockfd, req->recv_into.buf.buf, req->recv_into.buf.len, flags);
 
     Py_INCREF(req->future);
     return req->future;
+
+error:
+    free_request(req);
+    return NULL;
+}
+
+static PyObject *asyncfusion_uring_sock_recvfrom(IoUringObject *self, PyObject *args) {
+    // Create the request and submission queue entry
+    struct request *req = create_request(RECVFROM, &self->ring, NULL);
+    if (!req)
+        return NULL;
+
+    int flags = 0;
+    if (!PyArg_ParseTuple(args, "in|i:sock_recvfrom", &req->recvfrom.sockfd, &req->recvfrom.buflen, &req->recvfrom.flags))
+        goto error;
+
+    // Allocate a buffer for the receive operation
+    req->recvfrom.buf = PyMem_Malloc(req->recvfrom.buflen);
+    if (!req->recvfrom.buf) {
+        PyErr_NoMemory();
+        goto error;
+    }
+
+    // Create the submission queue entry
+    struct io_uring_sqe *sqe = get_new_sqe(&self->ring, req);
+    if (!sqe)
+        goto error;
+
+    // Prepare the poll_add() operation (as there is no recvfrom operation in io_uring
+    // at this time)
+    io_uring_prep_poll_add(sqe, req->recvfrom.sockfd, POLLIN);
+
+    Py_INCREF(req->future);
+    return req->future;
+
+error:
+    free_request(req);
+    return NULL;
+}
+
+static PyObject *asyncfusion_uring_sock_recvfrom_into(IoUringObject *self, PyObject *args) {
+    // Create the request (without a SQE)
+    struct request *req = create_request(RECVFROM_INTO, &self->ring, NULL);
+    if (!req)
+        return NULL;
+
+    if (!PyArg_ParseTuple(
+            args, "iw*i|i:sock_recvfrom_into", &req->recvfrom_into.sockfd,
+            &req->recvfrom_into.buf, &req->recvfrom_into.nbytes, &req->recvfrom_into.flags
+    ))
+        goto error;
+
+    // Create the submission queue entry
+    struct io_uring_sqe *sqe = get_new_sqe(&self->ring, req);
+    if (!sqe)
+        goto error;
+
+    // Prepare the poll_add() operation (as there is no recvfrom operation in io_uring
+    // at this time)
+    io_uring_prep_poll_add(sqe, req->recvfrom_into.sockfd, POLLIN);
+
+    Py_INCREF(req->future);
+    return req->future;
+
+error:
+    free_request(req);
+    return NULL;
 }
 
 static PyObject *asyncfusion_uring_sock_send(IoUringObject *self, PyObject *args) {
@@ -607,7 +702,7 @@ static PyObject *asyncfusion_uring_sock_sendto(IoUringObject *self, PyObject *ar
 
     // Create the request and the submission queue entry
     struct io_uring_sqe *sqe;
-    struct request *req = create_request(SEND, &self->ring, &sqe);
+    struct request *req = create_request(SENDTO, &self->ring, &sqe);
     if (!req)
         return NULL;
 
@@ -667,8 +762,7 @@ static PyObject *asyncfusion_uring_sock_wait_writable(IoUringObject *self, PyObj
 
 static PyObject *asyncfusion_uring_sleep(IoUringObject *self, PyObject *args) {
     double seconds = 0;
-    PyObject *result = Py_None;
-    if (!PyArg_ParseTuple(args, "d|O:sleep", &seconds, &result))
+    if (!PyArg_ParseTuple(args, "d:sleep", &seconds))
         return NULL;
 
     // Create the request and the submission queue entry
@@ -680,10 +774,6 @@ static PyObject *asyncfusion_uring_sleep(IoUringObject *self, PyObject *args) {
     // Fill in the timeout structure
     req->sleep.ts.tv_sec = (__kernel_time_t)floor(seconds);
     req->sleep.ts.tv_nsec = (long long)((seconds - floor(seconds)) * 1e9);
-
-    // Store the eventual result
-    Py_INCREF(result);
-    req->sleep.result = result;
 
     // Prepare the sleep() operation
     io_uring_prep_timeout(sqe, &req->sleep.ts, 0, 0);
@@ -701,7 +791,9 @@ static PyMethodDef IoUringMethods[] = {
     {"sock_close", (PyCFunction)asyncfusion_uring_sock_close, METH_VARARGS, "Close a socket"},
     {"sock_connect", (PyCFunction)asyncfusion_uring_sock_connect, METH_VARARGS, "Connect the given socket to the given address"},
     {"sock_recv", (PyCFunction)asyncfusion_uring_sock_recv, METH_VARARGS, "Receive data from a socket"},
+    {"sock_recv_into", (PyCFunction)asyncfusion_uring_sock_recv_into, METH_VARARGS, "Receive data from a socket into a pre-allocated buffer"},
     {"sock_recvfrom", (PyCFunction)asyncfusion_uring_sock_recvfrom, METH_VARARGS, "Receive data and the source address from a socket"},
+    {"sock_recvfrom_into", (PyCFunction)asyncfusion_uring_sock_recvfrom_into, METH_VARARGS, "Receive data and the source address from a socket into a pre-allocated buffer"},
     {"sock_send", (PyCFunction)asyncfusion_uring_sock_send, METH_VARARGS, "Send data to a socket"},
     {"sock_sendto", (PyCFunction)asyncfusion_uring_sock_sendto, METH_VARARGS, "Send data to the given address through a socket"},
     {"sock_wait_readable", (PyCFunction)asyncfusion_uring_sock_wait_readable, METH_VARARGS, "Wait until a socket has data to read"},

@@ -1,20 +1,21 @@
 from __future__ import annotations
 
-import socket
 import sys
 import time
-import traceback
-from bisect import insort_right
-from collections.abc import Awaitable, Callable, Coroutine, Generator
+from collections.abc import Awaitable, Callable, Coroutine
 from contextvars import ContextVar
-from functools import partial
-from traceback import print_tb
-from types import SimpleNamespace, coroutine
-from typing import Any, NoReturn, TYPE_CHECKING, TypeVar
+from socket import socket
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from ._futures import Future
 from ._tasks import Task
-from ._utils import empty, infinite
+from ._utils import infinite
+
+if sys.version_info >= (3, 12):
+    from typing import Buffer
+else:
+    from typing_extensions import Buffer
 
 if sys.version_info >= (3, 10):
     from typing import TypeAlias
@@ -55,6 +56,7 @@ def run(coro: Coroutine[Any, Any, T_Retval]) -> T_Retval:
 class EventLoop:
     def __init__(self) -> None:
         from ._io_uring import IoUring
+
         # self._tasks: set[Task] = {}
         self._scheduled_callbacks: list[AsyncCallback] = []
         # self._delayed_callbacks: list[DelayedCallback] = []
@@ -102,7 +104,9 @@ class EventLoop:
                         continue
 
                     if isinstance(value, Future):
-                        value.add_done_callback(lambda future: self.reschedule_task(callback))
+                        value.add_done_callback(
+                            lambda future: self.reschedule_task(callback)
+                        )
                     # if isinstance(value, Sleep):
                     #     if value.delay != infinite:
                     #         deadline = DelayedCallback(
@@ -145,82 +149,73 @@ class EventLoop:
 
         return main_task.result()
 
-    # def _reschedule_task_from_future(self, task: Task, future: Future[Any]) -> None:
-    #     assert future.done()
-    #     if exc := future.exception():
-    #         self.reschedule_task(task, exception=exc)
-    #     else:
-    #         self.reschedule_task(task, future.result())
+    def run_forever(self) -> None:
+        self._uring.init()
+        token = _current_event_loop.set(self)
+        try:
+            while not self._closed:
+                self.step()
+        finally:
+            _current_event_loop.reset(token)
+            self._uring.close()
 
     def reschedule_task(self, task: Task) -> None:
-        # def reschedule_task(
-        #     self, task: Task, value: object = empty, exception: BaseException | None = None
-        # ) -> None:
-        # if value is empty and exception is None:
-        #     raise RuntimeError(
-        #         f"INTERNAL ERROR: attempted to reschedule task {task.name} without a "
-        #         f"value to send or exception to throw"
-        #     )
-        #
-        # if task._send_value is not empty or task._send_exception is not None:
-        #     raise RuntimeError(
-        #         f"INTERNAL ERROR: attempted to reschedule task {task.name!r} which "
-        #         f"already has a pending value or exception"
-        #     )
-
-        # task._send_value = value
-        # task._send_exception = exception
         self._scheduled_callbacks.append(task)
 
     def time(self) -> float:
         return time.monotonic() - self._start_time
 
-    def sleep(self, delay: float, result: T_Retval | None = None) -> Awaitable[Any]:
+    def sleep(self, delay: float) -> Awaitable[Any]:
         if delay <= 0:
-            future = Future[T_Retval]()
-            future.set_result(result)
+            future = Future()
+            future.set_result(None)
             return future
         elif delay == infinite:
-            if result is not None:
-                raise ValueError(
-                    "sleep(math.inf) would never yield the result back to the task"
-                )
+            return Future()
 
-            return Future[NoReturn]()
+        return self._uring.sleep(delay)
 
-        return self._uring.sleep(delay, result)
+    async def sock_accept(self, sock: socket) -> tuple[socket, SocketAddress]:
+        sock_fd, addr = await self._uring.sock_accept(sock.fileno())
+        return socket(sock.family, sock.type, sock.proto, sock_fd), addr
 
-    def sock_accept(self, fd: int) -> Awaitable[tuple[int, SocketAddress]]:
-        return self._uring.sock_accept(fd)
+    async def sock_connect(self, sock: socket, address: SocketAddress) -> None:
+        await self._uring.sock_connect(sock.fileno(), sock.family, address)
 
-    def sock_connect(self, fd: int, family: socket.AddressFamily, address: SocketAddress) -> Awaitable[None]:
-        return self._uring.sock_connect(fd, family, address)
+    async def sock_recv(self, sock: socket, max_bytes: int, flags: int = 0) -> bytes:
+        return await self._uring.sock_recv(sock.fileno(), max_bytes, flags)
 
-    def sock_recv(self, fd: int, max_bytes: int, flags: int = 0) -> Awaitable[bytes]:
-        return self._uring.sock_recv(fd, max_bytes, flags)
+    async def sock_recv_into(self, sock: socket, buf: Buffer, flags: int = 0) -> bytes:
+        return await self._uring.sock_recv_into(sock.fileno(), buf, flags)
 
-    def sock_recvfrom(self, fd: int, max_bytes: int, flags: int = 0) -> Awaitable[tuple[bytes, SocketAddress]]:
-        return self._uring.sock_recvfrom(fd, max_bytes, flags)
+    async def sock_recvfrom(
+        self, sock: socket, max_bytes: int, flags: int = 0
+    ) -> tuple[bytes, SocketAddress]:
+        return await self._uring.sock_recvfrom(sock.fileno(), max_bytes, flags)
 
-    def sock_send(self, fd: int, data: bytes, flags: int = 0) -> Awaitable[int]:
-        return self._uring.sock_send(fd, data, flags)
+    async def sock_recvfrom_into(
+        self, sock: socket, buf: Buffer, max_bytes: int = 0, flags: int = 0
+    ) -> tuple[int, SocketAddress]:
+        return await self._uring.sock_recvfrom_into(
+            sock.fileno(), buf, max_bytes or len(buf), flags
+        )
 
-    def sock_sendto(self, fd: int, data: bytes, address: SocketAddress, flags: int = 0) -> Awaitable[int]:
-        return self._uring.sock_sendto(fd, data, address, flags)
+    async def sock_send(self, sock: socket, data: bytes, flags: int = 0) -> int:
+        return await self._uring.sock_send(sock.fileno(), data, flags)
 
-    def sock_close(self, fd: int) -> Awaitable[None]:
-        return self._uring.sock_close(fd)
+    async def sock_sendto(
+        self, sock: socket, data: bytes, address: SocketAddress, flags: int = 0
+    ) -> int:
+        return await self._uring.sock_sendto(sock.fileno(), data, address, flags)
 
-    def sock_wait_readable(self, fd: int) -> Awaitable[None]:
-        return self._uring.sock_wait_readable(fd)
+    async def sock_close(self, sock: socket) -> None:
+        await self._uring.sock_close(sock.fileno())
 
-    def sock_wait_writable(self, fd: int) -> Awaitable[None]:
-        return self._uring.sock_wait_writable(fd)
+    async def sock_wait_readable(self, sock: socket) -> None:
+        await self._uring.sock_wait_readable(sock.fileno())
 
-
-# @coroutine
-# def sleep(delay: float, /) -> Generator:
-#     yield Sleep(delay)
+    async def sock_wait_writable(self, sock: socket) -> None:
+        await self._uring.sock_wait_writable(sock.fileno())
 
 
 def current_event_loop() -> EventLoop:
@@ -233,8 +228,8 @@ def current_event_loop() -> EventLoop:
 
 
 def current_time() -> float:
-    return current_event_loop().current_time()
+    return current_event_loop().time()
 
 
-def sleep(delay: float, result: T_Retval = None) -> Awaitable[T_Retval]:
-    return current_event_loop().sleep(delay, result)
+def sleep(delay: float) -> Awaitable[T_Retval]:
+    return current_event_loop().sleep(delay)

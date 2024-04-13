@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import sys
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator
 from contextvars import Context
 from typing import Any, Generic, NamedTuple, TypeVar
 
@@ -97,9 +97,10 @@ class Future(Generic[T_Retval]):
 
         return 1
 
-    def __await__(self) -> Iterator[Self]:
+    def __await__(self) -> Generator[Any, Any, T_Retval]:
         yield self
         return self.result()
+
 
 # from typing import Generic, TypeVar
 #

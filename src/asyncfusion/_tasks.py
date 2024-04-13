@@ -22,7 +22,7 @@ _current_task: ContextVar[Task] = ContextVar("current_task")
 task_counter = count(1)
 
 
-class Task(Future):
+class Task(Generic[T_Retval], Future[T_Retval]):
     _name: str
     _coro: Coroutine[Any, Any, T_Retval]
     _parent_task_group: TaskGroup | None
@@ -102,7 +102,7 @@ class TaskGroup:
             raise RuntimeError("this task group has not been entered yet")
 
         task = Task(coro, str(name) if name else f"Task-{next(task_counter)}", self)
-        current_event_loop().reschedule_task(task, None)
+        current_event_loop().reschedule_task(task)
         self._tasks.add(task)
         task.add_done_callback(self._task_done)
         return task
@@ -133,7 +133,7 @@ class TaskGroup:
     async def __aexit__(
         self,
         exc_type: type[BaseException] | None,
-        exc_val: BaseException,
+        exc_val: BaseException | None,
         exc_tb: TracebackType | None,
     ) -> bool | None:
         from ._synchronization import Event
